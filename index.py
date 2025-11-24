@@ -48,7 +48,12 @@ class EhParser:
         soup = BeautifulSoup(html, 'html.parser')
         galleries = []
         main_table = soup.find('table', class_='itg gltc')
-        if not main_table: return {'galleries': [], 'pagination': {}}
+        # 如果找不到主表格，记录日志并返回空结果
+        if not main_table:
+            logging.warning("未能解析到画廊列表 (找不到 'itg gltc' 表格)。页面原始内容如下：")
+            logging.debug(html)
+            return {'galleries': [], 'pagination': {}}
+        
         rows = main_table.find_all('tr')
         for row in rows:
             try:
@@ -85,6 +90,12 @@ class EhParser:
                         if pages_match: gallery['pages'] = int(pages_match.group(1))
                 galleries.append(gallery)
             except Exception as e: logging.error(f"解析画廊项时发生错误: {e}"); continue
+        
+        # 如果循环后列表仍为空，可能页面有内容但所有行都解析失败
+        if not galleries and len(rows) > 1: # len(rows) > 1 是为了排除只有表头的情况
+            logging.warning("画廊列表解析结果为空，可能所有行都解析失败。页面原始内容如下：")
+            logging.debug(html)
+
         pagination = {'has_next': False, 'next_id': None}
         try:
             pager = soup.find('div', class_='searchnav') or soup.find('table', class_='ptt')
@@ -102,6 +113,12 @@ class EhParser:
     def parse_gallery_detail(html: str) -> Dict:
         soup = BeautifulSoup(html, 'html.parser'); detail = {}
         try:
+            # 检查核心元素是否存在
+            if not soup.select_one('#gn') and not soup.select_one('#gj'):
+                logging.warning("未能解析到画廊详情 (找不到标题元素 #gn 或 #gj)。页面原始内容如下：")
+                logging.debug(html)
+                return {}
+
             title_elem = soup.select_one('#gn');
             if title_elem: detail['title'] = title_elem.get_text(strip=True)
             title_jp_elem = soup.select_one('#gj');
@@ -129,6 +146,12 @@ class EhParser:
                 pages_text = pages_elem.get_text(strip=True); pages_match = re.search(r'(\d+)', pages_text)
                 if pages_match: detail['pages'] = int(pages_match.group(1))
         except Exception as e: logging.error(f"解析画廊详情时出错: {e}")
+        
+        # 如果最终字典为空，记录日志
+        if not detail:
+            logging.warning("画廊详情解析结果为空。页面原始内容如下：")
+            logging.debug(html)
+
         return detail
 
     @staticmethod
@@ -136,8 +159,13 @@ class EhParser:
         previews = []
         soup = BeautifulSoup(html, 'html.parser')
         container = soup.find('div', id='gdt')
-        if not container: return previews
-        for index, a_tag in enumerate(container.find_all('a')):
+        if not container:
+            logging.warning("未能解析到预览图列表 (找不到容器 #gdt)。页面原始内容如下：")
+            logging.debug(html)
+            return previews
+        
+        image_links = container.find_all('a')
+        for index, a_tag in enumerate(image_links):
             try:
                 div_tag = a_tag.find('div')
                 if not div_tag or 'style' not in div_tag.attrs: continue
@@ -148,16 +176,28 @@ class EhParser:
                     thumbnail_url = details_match.group(3); x_offset = abs(int(details_match.group(4))); y_offset = abs(int(details_match.group(5)))
                     previews.append({'index': index, 'page_url': a_tag['href'], 'thumbnail_url': thumbnail_url, 'crop_x': x_offset, 'crop_y': y_offset, 'crop_w': width, 'crop_h': height})
             except Exception as e: logging.error(f"解析单个预览图时出错: {e}"); continue
+        
+        if not previews and image_links:
+            logging.warning("预览图列表解析结果为空，但找到了 a 标签。页面原始内容如下：")
+            logging.debug(html)
+
         return previews
 
     @staticmethod
     def parse_image_page(html: str) -> Optional[str]:
         soup = BeautifulSoup(html, 'html.parser')
         img_container = soup.find('div', id='i3')
-        if not img_container: return None
+        if not img_container:
+            logging.warning("未能解析到大图页面 (找不到容器 #i3)。页面原始内容如下：")
+            logging.debug(html)
+            return None
         img_tag = img_container.find('img')
-        if not img_tag or 'src' not in img_tag.attrs: return None
+        if not img_tag or 'src' not in img_tag.attrs:
+            logging.warning("未能解析到大图 URL (在 #i3 中找不到带 src 的 img 标签)。页面原始内容如下：")
+            logging.debug(html)
+            return None
         return img_tag['src']
+
 
 # ==============================================================================
 # 模块 2: E-Hentai URL 构建器 (EhUrlBuilder)
@@ -216,30 +256,56 @@ class ImageProcessor:
 def get_gallery_list_data(url: str, headers: tuple):
     logging.info(f"缓存未命中或已过期，正在抓取列表页: {url}")
     html = fetch_page_for_request(url, dict(headers))
-    if not html: return None
-    return EhParser.parse_gallery_list(html)
+    if not html:
+        # fetch_page_for_request 内部已经记录了错误，这里无需重复记录
+        return None
+    
+    parsed_data = EhParser.parse_gallery_list(html)
+    # EhParser 内部已经增加了日志，这里返回即可
+    return parsed_data
 
 @cached(cache=gallery_cache)
 def get_gallery_detail_data(gid: int, token: str, headers: tuple, url_builder: 'EhUrlBuilder'):
     url = url_builder.build_gallery_url(gid=gid, token=token)
     logging.info(f"缓存未命中或已过期，正在抓取详情页: {url}")
     html = fetch_page_for_request(url, dict(headers))
-    if not html: return None
-    return EhParser.parse_gallery_detail(html)
+    if not html:
+        return None
+    
+    parsed_data = EhParser.parse_gallery_detail(html)
+    # 如果解析结果为空字典，说明解析失败
+    if not parsed_data:
+        logging.warning(f"画廊详情页 {url} 解析结果为空。")
+        # EhParser 内部已记录 HTML，这里只记录上下文
+        return None
+        
+    return parsed_data
 
 @cached(cache=gallery_cache)
 def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url_builder: 'EhUrlBuilder'):
     url = f"{url_builder.build_gallery_url(gid=gid, token=token)}?p={page}"
     logging.info(f"缓存未命中或已过期，正在抓取图片列表并并发解析所有大图: {url}")
     preview_html = fetch_page_for_request(url, dict(headers))
-    if not preview_html: return None
+    if not preview_html:
+        return None
+        
     preview_list = EhParser.parse_preview_images(preview_html)
-    if not preview_list: return []
+    if not preview_list:
+        logging.warning(f"画廊图片预览页 {url} 解析结果为空列表。")
+        # EhParser 内部已记录 HTML，这里返回空列表是符合预期的
+        return []
+
     final_images = [None] * len(preview_list)
     def fetch_and_parse_image_url(preview_item):
         page_html = fetch_page_for_request(preview_item['page_url'], dict(headers))
-        if page_html: return preview_item['index'], EhParser.parse_image_page(page_html)
+        if page_html:
+            image_url = EhParser.parse_image_page(page_html)
+            if image_url:
+                return preview_item['index'], image_url
+        # 如果获取或解析失败，返回 None
+        logging.warning(f"无法从 {preview_item['page_url']} 获取最终图片链接。")
         return preview_item['index'], None
+
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as executor:
         future_to_url = {executor.submit(fetch_and_parse_image_url, item): item for item in preview_list}
         for future in as_completed(future_to_url):
@@ -252,6 +318,7 @@ def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url
                     final_images[index] = {'index': index, 'thumbnail_jpg': thumbnail_proxy_url, 'image_jpg': f"/image/proxy?url={image_url}"}
             except Exception as exc: logging.error(f"并发任务生成异常: {exc}")
     return [img for img in final_images if img is not None]
+
 
 @cached(cache=image_proxy_cache)
 def get_processed_image_data(url: str, headers: tuple, max_width: int, quality: int, crop_params: Optional[tuple] = None):

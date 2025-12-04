@@ -439,6 +439,21 @@ def image_proxy():
 
 @app.route('/health')
 def health(): return jsonify({'status': 'ok', 'client_cookie_provided': bool(request.headers.get('X-EH-Cookie'))})
+@app.get("/config")
+@app.get("/config/")
+def config():
+    return jsonify(
+        {
+            "E-Hentai": {
+                "name": "E-Hentai",
+                "apiUrl": "https://eh-api.orpu.moe",
+                "searchPath": "/search?q=<text>&next=<page>",
+                "photoPath": "/gallery/<gid>/<token>/images?page=<page>",
+                "detailPath": "/gallery/<gid>/<token>",
+                "type": "ehentai",
+            },
+        }
+    )
 
 @app.errorhandler(404)
 def not_found(error): return jsonify({'error': '未找到请求的资源'}), 404
